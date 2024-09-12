@@ -4,8 +4,19 @@
 apt update && apt upgrade -y 
 apt install -y curl gnupg git nginx ufw certbot
 
-# Run the Configurator
-bash -c "./configurator"
+USE_ENV_FLAG=false
+
+for arg in "$@"; do
+  if [ "$arg" == "--use-env" ]; then
+    USE_ENV_FLAG=true
+    break
+  fi
+done
+
+# Run the Configurator only if --use-env flag is absent
+if [ "$USE_ENV_FLAG" = false ]; then
+  bash -c "./configurator"
+fi
 
 # Load Environment Variables
 set -a
