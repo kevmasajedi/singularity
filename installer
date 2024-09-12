@@ -1,0 +1,250 @@
+#!/bin/bash
+
+# Install the required packages
+apt update && apt upgrade -y 
+apt install -y curl gnupg git nginx ufw certbot
+
+# Run the Configurator
+bash -c "./configurator"
+
+# Load Environment Variables
+set -a
+source .env
+set +a
+
+# Copy Certificates
+SUBDOMAINS=("DATA_SUB_DOMAIN" "DISPATCH_SUB_DOMAIN" "REFLECTOR_SUB_DOMAIN")
+
+# Loop over each subdomain folder
+for SUB_DOMAIN in "$DATA_SUB_DOMAIN" "$DISPATCH_SUB_DOMAIN" "$REFLECTOR_SUB_DOMAIN"; do
+  SUB_DOMAIN_PATH="$CERT_SRC/$SUB_DOMAIN"
+
+  if [[ -f "$SUB_DOMAIN_PATH/fullchain.pem" ]]; then
+    DEST_DIR="$CERT_DIR/$SUB_DOMAIN"
+    
+    mkdir -p "$DEST_DIR"
+    
+    DEST_FULLCHAIN="$DEST_DIR/fullchain.pem"
+    
+    cat "$SUB_DOMAIN_PATH/fullchain.pem" > "$DEST_FULLCHAIN"
+    
+    echo "Copied fullchain.pem to $DEST_FULLCHAIN"
+  else
+    echo "fullchain.pem missing in $SUB_DOMAIN_PATH"
+  fi
+
+  if [[ -f "$SUB_DOMAIN_PATH/privkey.pem" ]]; then
+    DEST_PRIVKEY="$DEST_DIR/privkey.pem"
+    
+    cat "$SUB_DOMAIN_PATH/privkey.pem" > "$DEST_PRIVKEY"
+    echo "Copied privkey.pem to $DEST_PRIVKEY"
+  else
+    echo "privkey.pem missing in $SUB_DOMAIN_PATH"
+  fi
+done
+
+
+# Instal go
+wget https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz
+rm -rf /usr/local/go
+tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz
+rm go$GO_VERSION.linux-amd64.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+source ~/.bashrc
+go version
+
+# Install MongoDB
+OS_VERSION=$(lsb_release -cs)
+
+wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+
+if [ "$OS_VERSION" = "bullseye" ]; then
+  echo "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] http://repo.mongodb.org/apt/debian bullseye/mongodb-org/7.0 main" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+elif [ "$OS_VERSION" = "bookworm" ]; then
+  echo "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] http://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+else
+  echo "Unsupported Debian version: $OS_VERSION"
+  exit 1
+fi
+
+apt update && apt install -y mongodb-org
+
+systemctl start mongod
+systemctl enable mongod
+systemctl status mongod
+
+# Configuring the Firewall
+ufw allow OpenSSH
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw enable
+
+cat $CERT_DIR/$DATA_SUB_DOMAIN/privkey.pem $CERT_DIR/$DATA_SUB_DOMAIN/fullchain.pem > $CERT_DIR/mongodb.pem
+chown mongodb:mongodb $CERT_DIR/mongodb.pem
+chmod 600 $CERT_DIR/mongodb.pem
+
+# Create MongoDB Admin User
+
+mongosh <<EOF
+use admin
+db.createUser({
+  user: "$MONGO_ADMIN_USER",
+  pwd: "$MONGO_ADMIN_PWD",
+  roles: [
+    { role: "dbAdminAnyDatabase", db: "admin" },
+    { role: "readWriteAnyDatabase", db: "admin" },
+    { role: "userAdminAnyDatabase", db: "admin" }
+  ]
+})
+exit
+EOF
+
+# Mongodb Configuration To Enable TLS & Authorization
+bash -c "cat > /etc/mongod.conf <<EOF
+storage:
+  dbPath: /var/lib/mongodb
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+
+net:
+  port: 27017
+  bindIp: 0.0.0.0
+
+  tls: 
+    mode: requireTLS
+    certificateKeyFile: $CERT_DIR/mongodb.pem
+    CAFile: $CERT_DIR/$DATA_SUB_DOMAIN/fullchain.pem
+    allowConnectionsWithoutCertificates: true
+
+security:
+  authorization: enabled
+
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+EOF"
+
+systemctl restart mongod
+systemctl status mongod
+
+ufw allow in 27017/tcp
+
+echo "mongosh --host $DATA_SUB_DOMAIN --port 27017 -u $MONGO_ADMIN_USER -p $MONGO_ADMIN_PWD --tls --tlsCAFile $CERT_DIR/$DATA_SUB_DOMAIN/fullchain.pem" > ~/mongo.connect
+
+# Reflector Configuration:
+bash -c 'cat > /etc/nginx/sites-available/reflector <<EOF
+server {
+    listen 443 ssl;
+    server_name '"$REFLECTOR_SUB_DOMAIN"';
+
+    ssl_certificate '"$CERT_DIR"'/'"$REFLECTOR_SUB_DOMAIN"'/fullchain.pem;
+    ssl_certificate_key '"$CERT_DIR"'/'"$REFLECTOR_SUB_DOMAIN"'/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
+
+    location / {
+        proxy_pass http://localhost:8011;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF'
+
+ln -s /etc/nginx/sites-available/reflector /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+
+git clone https://github.com/kevmasajedi/reflector ~/reflector
+cd ~/reflector
+chmod +x service_install.sh
+./service_install.sh
+
+#Dispatch Configuration:
+bash -c 'cat > /etc/nginx/sites-available/dispatch <<EOF
+server {
+    listen 443 ssl;
+    server_name '"$DISPATCH_SUB_DOMAIN"';
+
+    ssl_certificate '"$CERT_DIR"'/'"$DISPATCH_SUB_DOMAIN"'/fullchain.pem;
+    ssl_certificate_key '"$CERT_DIR"'/'"$DISPATCH_SUB_DOMAIN"'/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
+
+    location / {
+        proxy_pass http://localhost:8012;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF'
+
+ln -s /etc/nginx/sites-available/dispatch /etc/nginx/sites-enabled/
+nginx -t && systemctl restart nginx
+
+# Connect to MongoDB using the connection string generated earlier
+mongosh --host $INFRAVERSE_HOST --port $INFRAVERSE_PORT -u $MONGO_ADMIN_USER -p $MONGO_ADMIN_PWD --tls --tlsCAFile $CERT_DIR/$DATA_SUB_DOMAIN/fullchain.pem <<EOF
+
+use $INFRAVERSE_DB
+
+db.createUser({
+  user: "$INFRAVERSE_USERNAME",
+  pwd: "$INFRAVERSE_PWD",
+  roles: [
+    { role: "dbOwner", db: "$INFRAVERSE_DB" }
+  ]
+})
+
+db.createUser({
+  user: "$WORKER_USERNAME",
+  pwd: "$WORKER_PWD",
+  roles: [
+    { role: "readWrite", db: "$INFRAVERSE_DB" }
+  ]
+})
+
+exit
+EOF
+
+
+git clone https://github.com/kevmasajedi/dispatch ~/dispatch
+cd ~/dispatch
+
+cat > .env <<EOF
+VERSE_USERNAME="$INFRAVERSE_USERNAME"
+VERSE_PASSWORD="$INFRAVERSE_PWD"
+VERSE_DB="$INFRAVERSE_DB"
+VERSE_HOST="$INFRAVERSE_HOST"
+VERSE_PORT="$INFRAVERSE_PORT"
+EOF
+
+mkdir -p cert
+cp $CERT_DIR/$DATA_SUB_DOMAIN/fullchain.pem cert/
+
+chmod +x service_install.sh
+./service_install.sh 
+
+#Hello World Example:
+
+git clone https://github.com/kevmasajedi/event_horizon ~/hello
+
+# Step 2: Navigate to the ~/hello directory
+cd ~/hello
+
+# Step 3: Create and fill out the .env file with worker variables
+cat > .env <<EOF
+VERSE_USERNAME="$WORKER_USERNAME"
+VERSE_PASSWORD="$WORKER_PWD"
+VERSE_DB="$INFRAVERSE_DB"
+VERSE_REFLECTOR="$REFLECTOR_SUB_DOMAIN"
+VERSE_HOST="$INFRAVERSE_HOST"
+VERSE_PORT="$INFRAVERSE_PORT"
+EOF
+
+mkdir -p cert
+cp $CERT_DIR/$DATA_SUB_DOMAIN/fullchain.pem cert/
+
+go build -o hello main.go

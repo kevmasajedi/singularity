@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Function to prompt user for input with a default value
+prompt() {
+    local var_name=$1
+    local default_value=$2
+    read -p "$var_name [$default_value]: " input_value
+    if [ -z "$input_value" ]; then
+        input_value=$default_value
+    fi
+    echo "$input_value"
+}
+
+# Prompt user for each variable
+GO_VERSION=$(prompt "GO_VERSION" "1.23.1")
+DATA_SUB_DOMAIN=$(prompt "DATA_SUB_DOMAIN" "db.your_domain.com")
+DISPATCH_SUB_DOMAIN=$(prompt "DISPATCH_SUB_DOMAIN" "dispatch.your_domain.com")
+REFLECTOR_SUB_DOMAIN=$(prompt "REFLECTOR_SUB_DOMAIN" "reflector.your_domain.com")
+
+AUTO_CERT=$(prompt "Would you like certificates to be issued automatically with certbot?" "yes")
+
+if [ "$AUTO_CERT" = "yes" ]; then
+    CERT_DIR="/cert"
+    for SUBDOMAIN in $DATA_SUB_DOMAIN $DISPATCH_SUB_DOMAIN $REFLECTOR_SUB_DOMAIN; do
+        certbot certonly --webroot -w /var/www/html --domain $SUBDOMAIN --key-type ecdsa --elliptic-curve secp384r1
+    done
+    CERT_SRC="/etc/letsencrypt/live"
+else
+    CERT_DIR=$(prompt "CERT_DIR" "/cert")
+    CERT_SRC=$(prompt "CERT_SRC" "/etc/letsencrypt/live")
+fi
+
+MONGO_ADMIN_USER=$(prompt "MONGO_ADMIN_USER" "user")
+MONGO_ADMIN_PWD=$(prompt "MONGO_ADMIN_PWD" "pass")
+
+INFRAVERSE_USERNAME=$(prompt "INFRAVERSE_USERNAME" "owner")
+INFRAVERSE_PWD=$(prompt "INFRAVERSE_PWD" "pass")
+WORKER_USERNAME=$(prompt "WORKER_USERNAME" "worker")
+WORKER_PWD=$(prompt "WORKER_PWD" "pass")
+INFRAVERSE_DB=$(prompt "INFRAVERSE_DB" "infraverse")
+INFRAVERSE_HOST=$DATA_SUB_DOMAIN
+INFRAVERSE_PORT=$(prompt "INFRAVERSE_PORT" "27017")
+
+# Display values for verification
+echo "GO_VERSION=$GO_VERSION"
+echo "CERT_DIR=$CERT_DIR"
+echo "CERT_SRC=$CERT_SRC"
+echo "DATA_SUB_DOMAIN=$DATA_SUB_DOMAIN"
+echo "DISPATCH_SUB_DOMAIN=$DISPATCH_SUB_DOMAIN"
+echo "REFLECTOR_SUB_DOMAIN=$REFLECTOR_SUB_DOMAIN"
+
+echo "MONGO_ADMIN_USER=$MONGO_ADMIN_USER"
+echo "MONGO_ADMIN_PWD=$MONGO_ADMIN_PWD"
+
+echo "INFRAVERSE_USERNAME=$INFRAVERSE_USERNAME"
+echo "INFRAVERSE_PWD=$INFRAVERSE_PWD"
+echo "WORKER_USERNAME=$WORKER_USERNAME"
+echo "WORKER_PWD=$WORKER_PWD"
+echo "INFRAVERSE_DB=$INFRAVERSE_DB"
+echo "INFRAVERSE_HOST=$INFRAVERSE_HOST"
+echo "INFRAVERSE_PORT=$INFRAVERSE_PORT"
+
+# Save to .env file
+cat <<EOF > ./.env
+GO_VERSION=$GO_VERSION
+CERT_DIR=$CERT_DIR
+CERT_SRC=$CERT_SRC
+DATA_SUB_DOMAIN=$DATA_SUB_DOMAIN
+DISPATCH_SUB_DOMAIN=$DISPATCH_SUB_DOMAIN
+REFLECTOR_SUB_DOMAIN=$REFLECTOR_SUB_DOMAIN
+
+MONGO_ADMIN_USER=$MONGO_ADMIN_USER
+MONGO_ADMIN_PWD=$MONGO_ADMIN_PWD
+
+INFRAVERSE_USERNAME=$INFRAVERSE_USERNAME
+INFRAVERSE_PWD=$INFRAVERSE_PWD
+WORKER_USERNAME=$WORKER_USERNAME
+WORKER_PWD=$WORKER_PWD
+INFRAVERSE_DB=$INFRAVERSE_DB
+INFRAVERSE_HOST=$INFRAVERSE_HOST
+INFRAVERSE_PORT=$INFRAVERSE_PORT
+EOF
+
+echo "Environment variables saved to ./.env"
