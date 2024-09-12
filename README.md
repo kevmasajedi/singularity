@@ -258,6 +258,7 @@ To test all the components of the system are working as intended, let's download
 VERSE_USERNAME="<user>"
 VERSE_PASSWORD="<pass>"
 VERSE_DB="<db_name>"
+VERSE_REFLECTOR="<reflector_sub_domain>"
 VERSE_HOST="<db_sub_domain>"
 VERSE_PORT="27017 or <your_mongo_port>"
 ```
